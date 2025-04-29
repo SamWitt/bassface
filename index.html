@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bass Note Detector</title>
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #111;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: white;
+      font-family: sans-serif;
+    }
+    #container {
+      text-align: center;
+    }
+    #note {
+      font-size: 8em;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #freq {
+      font-size: 1.5em;
+      margin-bottom: 20px;
+      height: 30px;
+    }
+    #meter {
+      width: 300px;
+      height: 50px;
+      background-color: #333;
+      border-radius: 5px;
+      margin-bottom: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    #level {
+      height: 100%;
+      width: 0%;
+      background-color: #4CAF50;
+      transition: width 0.1s;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 1.2em;
+      border: none;
+      border-radius: 5px;
+      background-color: #4CAF50;
+      color: white;
+      cursor: pointer;
+      margin-bottom: 20px;
+    }
+    #status {
+      margin-top: 20px;
+      font-size: 1em;
+      color: #999;
+    }
+    .string-indicator {
+      display: inline-block;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      margin: 0 5px;
+      background-color: #333;
+      text-align: center;
+      line-height: 40px;
+      font-size: 1.2em;
+    }
+    .active {
+      background-color: #4CAF50;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="meter"><div id="level"></div></div>
+    <div id="freq">0 Hz</div>
+    <div id="note">—</div>
+    <div id="strings">
+      <div class="string-indicator" id="string-E">E</div>
+      <div class="string-indicator" id="string-A">A</div>
+      <div class="string-indicator" id="string-D">D</div>
+      <div class="string-indicator" id="string-G">G</div>
+    </div>
+    <button id="start">Start Listening</button>
+    <div id="status">Click 'Start Listening' and play your bass</div>
+  </div>
+
+  <script>
+    // DOM elements
+    const noteDiv = document.getElementById('note');
+    const freqDiv = document.getElementById('freq');
+    const levelDiv = document.getElementById('level');
+    const startButton = document.getElementById('start');
+    const statusDiv = document.getElementById('status');
+    const stringE = document.getElementById('string-E');
+    const stringA = document.getElementById('string-A');
+    const stringD = document.getElementById('string-D');
+    const stringG = document.getElementById('string-G');
+
+    // Audio context
+    let audioCtx;
+    let analyser;
+    let micStream;
+    let dataArray;
+    let bufferLength;
+    let isListening = false;
+
+    // Bass string frequencies (standard tuning, with some tolerance)
+    const bassStrings = {
+      'E': { frequency: 41.2, min: 39, max: 43, element: stringE },
+      'A': { frequency: 55, min: 53, max: 57, element: stringA },
+      'D': { frequency: 73.4, min: 71, max: 76, element: stringD },
+      'G': { frequency: 98, min: 95, max: 101, element: stringG }
+    };
+
+    // Start button click handler
+    startButton.addEventListener('click', () => {
+      if (isListening) {
+        stopListening();
+      } else {
+        startListening();
+      }
+    });
+
+    // Start listening for audio
+    function startListening() {
+      if (isListening) return;
+      
+      try {
+        // Create audio context
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        statusDiv.textContent = 'Requesting microphone access...';
+        
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(stream => {
+            micStream = audioCtx.createMediaStreamSource(stream);
+            
+            // Create analyser node
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 4096; // Larger FFT size for better low-frequency resolution
+            bufferLength = analyser.frequencyBinCount;
+            dataArray = new Float32Array(bufferLength);
+            
+            // Create filter for bass frequencies (20Hz - 400Hz)
+            const bassFilter = audioCtx.createBiquadFilter();
+            bassFilter.type = 'lowpass';
+            bassFilter.frequency.value = 400; // Focus on bass frequencies
+            
+            // Connect nodes
+            micStream.connect(bassFilter);
+            bassFilter.connect(analyser);
+            
+            isListening = true;
+            startButton.textContent = 'Stop Listening';
+            statusDiv.textContent = 'Listening for bass notes...';
+            
+            // Start detection loop
+            detectPitch();
+          })
+          .catch(err => {
+            console.error('Error accessing microphone:', err);
+            statusDiv.textContent = 'Error: ' + (err.message || 'Could not access microphone');
+          });
+      } catch (err) {
+        console.error('Audio context error:', err);
+        statusDiv.textContent = 'Error initializing audio: ' + (err.message || 'Unknown error');
+      }
+    }
+
+    // Stop listening
+    function stopListening() {
+      if (!isListening) return;
+      
+      if (micStream && micStream.mediaStream) {
+        const tracks = micStream.mediaStream.getTracks();
+        tracks.forEach(track => track.stop());
+      }
+      
+      if (audioCtx) {
+        audioCtx.close();
+      }
+      
+      isListening = false;
+      startButton.textContent = 'Start Listening';
+      statusDiv.textContent = 'Stopped listening';
+      noteDiv.textContent = '—';
+      freqDiv.textContent = '0 Hz';
+      levelDiv.style.width = '0%';
+      clearStringHighlights();
+    }
+
+    // Detect pitch using autocorrelation
+    function detectPitch() {
+      if (!isListening) return;
+      
+      // Get time domain data
+      analyser.getFloatTimeDomainData(dataArray);
+      
+      // Calculate RMS (audio level)
+      let rms = calculateRMS(dataArray);
+      let level = Math.min(100, rms * 500);
+      levelDiv.style.width = level + '%';
+      
+      // Only detect pitch if audio level is high enough
+      if (rms > 0.01) {
+        const frequency = findFundamentalFrequency(dataArray, audioCtx.sampleRate);
+        
+        if (frequency > 0) {
+          const note = frequencyToNote(frequency);
+          freqDiv.textContent = `${Math.round(frequency * 10) / 10} Hz`;
+          noteDiv.textContent = note;
+          
+          // Highlight string if it matches a bass string
+          highlightMatchingString(frequency);
+        }
+      } else {
+        noteDiv.textContent = '—';
+        freqDiv.textContent = '< noise >';
+        clearStringHighlights();
+      }
+      
+      // Continue detection loop
+      requestAnimationFrame(detectPitch);
+    }
+
+    // Calculate RMS (audio level)
+    function calculateRMS(buffer) {
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        sum += buffer[i] * buffer[i];
+      }
+      return Math.sqrt(sum / buffer.length);
+    }
+
+    // YIN algorithm for fundamental frequency detection
+    // (Better for bass notes than basic autocorrelation)
+    function findFundamentalFrequency(buffer, sampleRate) {
+      const threshold = 0.2;
+      const minFreq = 30; // E1 is around 41Hz, but we'll go a bit lower
+      const maxFreq = 400; // Upper range for bass
+      
+      const minPeriod = Math.floor(sampleRate / maxFreq);
+      const maxPeriod = Math.floor(sampleRate / minFreq);
+      
+      // Step 1: Difference function
+      const yinBuffer = new Float32Array(maxPeriod);
+      yinBuffer[0] = 1;
+      
+      for (let t = 1; t < maxPeriod; t++) {
+        let sum = 0;
+        for (let i = 0; i < maxPeriod; i++) {
+          const delta = buffer[i] - buffer[i + t];
+          sum += delta * delta;
+        }
+        yinBuffer[t] = sum;
+      }
+      
+      // Step 2: Cumulative mean normalized difference
+      let runningSum = 0;
+      for (let t = 1; t < maxPeriod; t++) {
+        runningSum += yinBuffer[t];
+        yinBuffer[t] = yinBuffer[t] * t / runningSum;
+      }
+      
+      // Step 3: Find minimum under threshold
+      let minValue = Number.MAX_VALUE;
+      let minTau = 0;
+      
+      // Start at minPeriod to avoid ultra-high frequencies
+      for (let t = minPeriod; t < maxPeriod; t++) {
+        if (yinBuffer[t] < threshold) {
+          if (yinBuffer[t] < yinBuffer[t - 1] && yinBuffer[t] < yinBuffer[t + 1]) {
+            if (yinBuffer[t] < minValue) {
+              minValue = yinBuffer[t];
+              minTau = t;
+            }
+          }
+          break;
+        } else if (yinBuffer[t] < minValue) {
+          minValue = yinBuffer[t];
+          minTau = t;
+        }
+      }
+      
+      // Step 4: Interpolate for better accuracy
+      let betterTau;
+      if (minTau > 0 && minTau < maxPeriod - 1) {
+        const s0 = yinBuffer[minTau - 1];
+        const s1 = yinBuffer[minTau];
+        const s2 = yinBuffer[minTau + 1];
+        betterTau = minTau + (s2 - s0) / (2 * (2 * s1 - s2 - s0));
+      } else {
+        betterTau = minTau;
+      }
+      
+      return betterTau > 0 ? sampleRate / betterTau : -1;
+    }
+
+    // Convert frequency to note name
+    function frequencyToNote(freq) {
+      const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+      const A4 = 440.0;
+      
+      // Calculate how many half steps away from A4
+      const halfStepsFromA4 = 12 * Math.log2(freq / A4);
+      
+      // Round to nearest integer to get the number of half steps
+      const halfStepsFromA4Rounded = Math.round(halfStepsFromA4);
+      
+      // Calculate the octave
+      // A4 is at index 9 in the 4th octave
+      const octave = Math.floor((halfStepsFromA4Rounded + 9) / 12) + 4;
+      
+      // Calculate the note index
+      const noteIdx = (halfStepsFromA4Rounded + 9) % 12;
+      if (noteIdx < 0) {
+        noteIdx += 12;
+      }
+      
+      // Get the note name
+      const noteName = noteNames[noteIdx];
+      
+      return `${noteName}${octave}`;
+    }
+
+    // Highlight matching bass string
+    function highlightMatchingString(frequency) {
+      clearStringHighlights();
+      
+      for (const [key, data] of Object.entries(bassStrings)) {
+        if (frequency >= data.min && frequency <= data.max) {
+          data.element.classList.add('active');
+          return;
+        }
+      }
+      
+      // If no exact string match, check if it's a note on a string (allowing for playing up the neck)
+      // For simplicity, we just check if it's in the bass range
+      if (frequency >= 30 && frequency <= 400) {
+        // It's a bass note, but not an open string
+      }
+    }
+
+    // Clear string highlights
+    function clearStringHighlights() {
+      for (const data of Object.values(bassStrings)) {
+        data.element.classList.remove('active');
+      }
+    }
+  </script>
+</body>
+</html>
